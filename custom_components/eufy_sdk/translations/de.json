@@ -1,0 +1,12 @@
+{
+  "entity": {
+    "camera": {
+      "fixed": {
+        "name": "Fest"
+      },
+      "movable": {
+        "name": "Beweglich"
+      }
+    }
+  }
+}

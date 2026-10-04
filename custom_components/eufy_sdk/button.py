@@ -63,7 +63,9 @@ async def async_setup_entry(
             EufySdkPtzButton(coordinator, sn, action, meta)
             for action, meta in _PTZ_STEPS.items()
         )
-        entities.append(EufySdkGotoPresetButton(coordinator, sn))
+        # S4 direction commands are known; preset commands are not yet verified.
+        if dev.get("model") != "T8E00":
+            entities.append(EufySdkGotoPresetButton(coordinator, sn))
     async_add_entities(entities)
 
 

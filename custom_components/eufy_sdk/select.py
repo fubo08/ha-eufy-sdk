@@ -83,7 +83,7 @@ async def async_setup_entry(
     entities.extend(
         EufySdkPresetSelect(coordinator, sn)
         for sn, dev in coordinator.data.items()
-        if has_capability(dev, "ptz")
+        if has_capability(dev, "ptz") and dev.get("model") != "T8E00"
     )
     entities.extend(
         EufySdkSnapshotPolicySelect(coordinator, sn)
