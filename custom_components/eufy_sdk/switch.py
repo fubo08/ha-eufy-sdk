@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import EntityCategory
+from homeassistant.exceptions import HomeAssistantError
 
 from .bespoke import BITFIELD_SWITCHES
 from .entity import (
@@ -165,13 +166,23 @@ class EufyBitmaskSwitch(EufySdkPropertyEntity, SwitchEntity):
     def _mask(self) -> int:
         """Return the current full bitmask value (falls back to the enable base)."""
         v = self.prop_value
-        return int(v) if isinstance(v, (int, float)) else self._base
+        if v is None:
+            return self._base
+        try:
+            return int(v)
+        except (TypeError, ValueError, OverflowError) as err:
+            raise HomeAssistantError("Cannot change an unsupported bitmask value") from err
 
     @property
     def is_on(self) -> bool | None:
         """On when this bit is set in the current mask."""
         v = self.prop_value
-        return None if v is None else bool(int(v) & self._bit)
+        if v is None:
+            return None
+        try:
+            return bool(int(v) & self._bit)
+        except (TypeError, ValueError, OverflowError):
+            return None
 
     async def async_turn_on(self, **_: Any) -> None:
         """Set this bit while preserving every other reported bit."""

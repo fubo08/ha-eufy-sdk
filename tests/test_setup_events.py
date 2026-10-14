@@ -1,4 +1,4 @@
-# ruff: noqa: ANN201, D100, D101, D102, INP001, PT009
+# ruff: noqa: ANN201, D100, D101, D102, INP001, PT009, SLF001
 
 import unittest
 from typing import Any
@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import custom_components.eufy_sdk as integration
 from custom_components.eufy_sdk.const import CONF_HOST, CONF_PORT
+from custom_components.eufy_sdk.api import EufySdkApiClient
 
 
 class SetupEventTests(unittest.IsolatedAsyncioTestCase):
@@ -38,6 +39,29 @@ class SetupEventTests(unittest.IsolatedAsyncioTestCase):
         def make_client(**kwargs: Any) -> Mock:
             callbacks.append(kwargs["on_event"])
             return client
+
+        async def first_refresh() -> None:
+            coordinator.data = None
+            receiver = EufySdkApiClient(
+                host="bridge", port=3000, session=Mock(), on_event=callbacks[0]
+            )
+            for event in (
+                {"event": "armingModeChanged", "deviceSn": "homebase"},
+                {"event": "armingModeChanged", "deviceSn": "homebase", "mode": 1},
+                {"event": "contactState", "deviceSn": "homebase", "open": True},
+                {"event": "propertyChanged", "deviceSn": "homebase", "property": "armingMode", "value": 1},
+                {"event": "ready"},
+            ):
+                receiver._dispatch_event(event)
+                hass.bus.async_fire.assert_called_with(integration.EVENT_TYPE, event)
+            self.assertEqual(len(scheduled), 1)
+            await scheduled.pop()
+            coordinator.async_request_refresh.assert_awaited_once_with()
+            coordinator.async_request_refresh.reset_mock()
+            coordinator.data = {"homebase": {"name": "Synthetic station", "model": "T8N00", "category": "station", "state": {"armingMode": 1}}}
+
+        hass.async_create_task = Mock(side_effect=scheduled.append)
+        coordinator.async_config_entry_first_refresh.side_effect = first_refresh
 
         with (
             patch.object(

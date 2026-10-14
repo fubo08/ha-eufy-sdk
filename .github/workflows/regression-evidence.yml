@@ -1,0 +1,57 @@
+name: Regression evidence
+on:
+  push:
+    branches: [codex/eufy-regression-evidence-20261014]
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.14'
+      - run: python -m pip install -r requirements_common.txt -r requirements_dev.txt pytest
+      - name: Format candidate
+        run: |
+          ruff check --fix custom_components/eufy_sdk/switch.py custom_components/eufy_sdk/__init__.py tests/test_bitmask_switch.py tests/test_setup_events.py
+          ruff format custom_components/eufy_sdk/switch.py custom_components/eufy_sdk/__init__.py tests/test_bitmask_switch.py tests/test_setup_events.py
+      - name: Demonstrate original failures
+        shell: bash
+        run: |
+          cp custom_components/eufy_sdk/switch.py /tmp/fixed-switch.py
+          cp custom_components/eufy_sdk/__init__.py /tmp/fixed-init.py
+          git show 4f42e51f451781186d9a26f3953479bdd1d8f7c5:custom_components/eufy_sdk/switch.py > custom_components/eufy_sdk/switch.py
+          git show 4f42e51f451781186d9a26f3953479bdd1d8f7c5:custom_components/eufy_sdk/__init__.py > custom_components/eufy_sdk/__init__.py
+          set +e
+          python -m pytest tests/test_bitmask_switch.py -k json_value -q > before-bitmask.txt 2>&1
+          bitmask_exit=$?
+          python -m pytest tests/test_setup_events.py -q > before-events.txt 2>&1
+          events_exit=$?
+          set -e
+          cat before-bitmask.txt before-events.txt
+          cp /tmp/fixed-switch.py custom_components/eufy_sdk/switch.py
+          cp /tmp/fixed-init.py custom_components/eufy_sdk/__init__.py
+          test "$bitmask_exit" = 1
+          test "$events_exit" = 1
+          grep -q 'ValueError' before-bitmask.txt
+          grep -q 'TypeError' before-events.txt
+      - name: Validate fixed candidate
+        run: |
+          python -m pytest tests/ -q
+          ruff check .
+          ruff format . --check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-and-formatted-source
+          path: |
+            before-*.txt
+            custom_components/eufy_sdk/switch.py
+            custom_components/eufy_sdk/__init__.py
+            tests/test_bitmask_switch.py
+            tests/test_setup_events.py

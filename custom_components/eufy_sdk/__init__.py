@@ -163,6 +163,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: EufySdkConfigEntry) -> b
     def _on_event(evt: dict) -> None:
         event = evt.get("event")
 
+        if coordinator.data is None:
+            hass.bus.async_fire(EVENT_TYPE, evt)
+            if event == "ready":
+                _refresh_now()
+            return
+
         if event == "propertyChanged":
             _apply_property_changed(hass, entry, coordinator, evt)
 
