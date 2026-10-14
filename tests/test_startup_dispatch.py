@@ -20,6 +20,7 @@ class StartupDispatchTests(unittest.IsolatedAsyncioTestCase):
         entry.options = {}
         entry.domain = "eufy_sdk"
         entry.entry_id = "test-entry"
+        entry.unique_id = "synthetic-bridge-id"
         entry.add_update_listener = Mock(return_value=lambda: None)
         entry.async_on_unload = Mock()
         scheduled = []
@@ -31,7 +32,7 @@ class StartupDispatchTests(unittest.IsolatedAsyncioTestCase):
         coordinator.async_config_entry_first_refresh = AsyncMock()
         coordinator.async_request_refresh = AsyncMock()
 
-        client = Mock()
+        client = Mock(bridge_id="synthetic-bridge-id")
         client.set_poll_ms = AsyncMock()
         client.get_properties = AsyncMock(return_value=[])
         callbacks = []
