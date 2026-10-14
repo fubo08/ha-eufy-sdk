@@ -1,0 +1,35 @@
+name: Startup dispatch evidence
+on:
+  push:
+    branches: [codex/startup-dispatch-evidence]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.14'
+      - run: python -m pip install -r requirements_common.txt -r requirements_dev.txt pytest
+      - name: Original reported failure
+        run: |
+          cp custom_components/eufy_sdk/__init__.py /tmp/fixed-init.py
+          git show 4f42e51f451781186d9a26f3953479bdd1d8f7c5:custom_components/eufy_sdk/__init__.py > custom_components/eufy_sdk/__init__.py
+          set +e
+          python -m pytest tests/test_startup_dispatch.py -q > before.txt 2>&1
+          result=$?
+          set -e
+          cat before.txt
+          cp /tmp/fixed-init.py custom_components/eufy_sdk/__init__.py
+          test "$result" = 1
+          grep -q "TypeError: argument of type 'NoneType'" before.txt
+      - name: Current dev and contributed regression
+        run: |
+          python -m pytest tests/ -q
+          ruff check .
+          ruff format . --check
