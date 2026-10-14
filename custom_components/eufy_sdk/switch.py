@@ -171,7 +171,8 @@ class EufyBitmaskSwitch(EufySdkPropertyEntity, SwitchEntity):
         try:
             return int(v)
         except (TypeError, ValueError, OverflowError) as err:
-            raise HomeAssistantError("Cannot change an unsupported bitmask value") from err
+            msg = "Cannot change an unsupported bitmask value"
+            raise HomeAssistantError(msg) from err
 
     @property
     def is_on(self) -> bool | None:

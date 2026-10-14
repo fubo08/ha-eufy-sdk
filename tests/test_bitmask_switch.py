@@ -1,6 +1,6 @@
 """Regression tests for bitfield switch writes."""
 
-# ruff: noqa: INP001, S101, SLF001
+# ruff: noqa: INP001, S101, SLF001, PT009
 
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock
@@ -77,7 +77,10 @@ class TestEufyBitmaskSwitch(IsolatedAsyncioTestCase):
 
     async def test_json_value_is_unknown_and_cannot_overwrite_structured_settings(self) -> None:
         """An NVR JSON value cannot be replaced with a fallback integer mask."""
-        value = '{"ai_detect_type":196623,"ai_switch":1,"ai_use_global":1,"ai_notification":2147483648,"channel":0}'
+        value = (
+            '{"ai_detect_type":196623,"ai_switch":1,"ai_use_global":1,'
+            '"ai_notification":2147483648,"channel":0}'
+        )
         coordinator = Mock(
             data={
                 "T8E00TEST00000001": {
