@@ -1,6 +1,6 @@
 """Regression tests for bitfield switch writes."""
 
-# ruff: noqa: INP001, S101, SLF001, PT009
+# ruff: noqa: INP001, S101, SLF001, PT027
 
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock

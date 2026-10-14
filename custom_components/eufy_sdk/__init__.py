@@ -163,20 +163,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: EufySdkConfigEntry) -> b
     def _on_event(evt: dict) -> None:
         event = evt.get("event")
 
-        if coordinator.data is None:
-            hass.bus.async_fire(EVENT_TYPE, evt)
-            if event == "ready":
-                _refresh_now()
-            return
-
-        if event == "propertyChanged":
+        if event == "propertyChanged" and coordinator.data is not None:
             _apply_property_changed(hass, entry, coordinator, evt)
 
         # Fire after applying direct state so entity listeners reacting to the bus
         # already see the new coordinator value.
         hass.bus.async_fire(EVENT_TYPE, evt)
 
-        if event == "contactState":
+        if event == "ready":
+            _refresh_now()
+        elif coordinator.data is None:
+            # The first refresh supplies state; early events still reach the bus.
+            return
+        elif event == "contactState":
             sn = evt.get("deviceSn") or evt.get("sn")
             if sn and sn in coordinator.data and "open" in evt:
                 coordinator.data[sn].setdefault("state", {})["contact"] = bool(
@@ -196,8 +195,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: EufySdkConfigEntry) -> b
                 )
         elif event == "alarm":
             on_alarm(evt)
-        elif event == "ready":
-            _refresh_now()
 
     client = EufySdkApiClient(
         host=entry.data[CONF_HOST],
