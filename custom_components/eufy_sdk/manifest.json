@@ -2,11 +2,11 @@
   "domain": "eufy_sdk",
   "name": "eufy-sdk",
   "codeowners": [
-    "@mega-yfue"
+    "@fubo08"
   ],
   "config_flow": true,
-  "documentation": "https://github.com/mega-yfue/ha-eufy-sdk",
+  "documentation": "https://github.com/fubo08/ha-eufy-sdk",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/mega-yfue/ha-eufy-sdk/issues",
-  "version": "0.6.0"
+  "issue_tracker": "https://github.com/fubo08/ha-eufy-sdk/issues",
+  "version": "0.6.1b1"
 }

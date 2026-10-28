@@ -42,27 +42,39 @@ async def async_setup_entry(
     port = entry.data[CONF_PORT]
     rtsp_port = int(entry.data.get(CONF_GO2RTC_RTSP_PORT, DEFAULT_GO2RTC_RTSP_PORT))
     async_add_entities(
-        EufySdkCamera(coordinator, sn, host, port, rtsp_port)
+        EufySdkCamera(coordinator, sn, host, port, rtsp_port, sensor=sensor)
         for sn, dev in coordinator.data.items()
         if dev.get("stream")
+        for sensor in camera_sensors(dev)
     )
+
+
+def camera_sensors(dev: dict) -> list[int | None]:
+    """Offer both S4 lenses only when the bridge advertises their streams."""
+    sensors = {
+        item.get("sensor")
+        for item in dev.get("streams", []) or []
+        if isinstance(item, dict) and type(item.get("sensor")) is int
+    }
+    return [1, 0] if dev.get("model") == "T8E00" and sensors == {0, 1} else [None]
 
 
 class EufySdkCamera(CoordinatorEntity["EufySdkDataUpdateCoordinator"], Camera):
     """A camera via the bridge: live via go2rtc RTSP, stills via snapshot."""
 
     _attr_has_entity_name = True
-    _attr_name = None  # the device name is the camera name
     _attr_attribution = ATTRIBUTION
     _attr_supported_features = CameraEntityFeature.STREAM
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         coordinator: EufySdkDataUpdateCoordinator,
         sn: str,
         host: str,
         port: int,
         rtsp_port: int,
+        *,
+        sensor: int | None = None,
     ) -> None:
         """Bind to a device serial + the bridge address."""
         CoordinatorEntity.__init__(self, coordinator)
@@ -71,7 +83,15 @@ class EufySdkCamera(CoordinatorEntity["EufySdkDataUpdateCoordinator"], Camera):
         self._host = host
         self._port = port
         self._rtsp_port = rtsp_port
+        self._sensor = sensor
+        self._stream_id = f"{sn}_fixed" if sensor == 0 else sn
         self._attr_unique_id = f"{sn}_camera"
+        if sensor is not None:
+            self._attr_translation_key = "fixed" if sensor == 0 else "movable"
+        else:
+            self._attr_name = None
+        if sensor == 0:
+            self._attr_unique_id = f"{sn}_camera_sensor_0"
         dev = coordinator.data.get(sn, {})
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, sn)},
@@ -99,7 +119,7 @@ class EufySdkCamera(CoordinatorEntity["EufySdkDataUpdateCoordinator"], Camera):
 
     async def stream_source(self) -> str:
         """Return the go2rtc RTSP URL — HA's stream component + go2rtc do the work."""
-        return f"rtsp://{self._host}:{self._rtsp_port}/{self._sn}"
+        return f"rtsp://{self._host}:{self._rtsp_port}/{self._stream_id}"
 
     async def async_create_stream(self) -> Stream | None:
         """
@@ -128,6 +148,11 @@ class EufySdkCamera(CoordinatorEntity["EufySdkDataUpdateCoordinator"], Camera):
             self._sn,
             self.coordinator.config_entry.runtime_data.snapshot_policy.get(self._sn),
         )
+        if self._sensor is not None:
+            url = (
+                f"http://{self._host}:{self._port}"
+                f"/nvr-snapshot/{self._sn}/{self._sensor}"
+            )
         try:
             async with session.get(url, timeout=20) as resp:
                 if resp.status == HTTPStatus.OK:

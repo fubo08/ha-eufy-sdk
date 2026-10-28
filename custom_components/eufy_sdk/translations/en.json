@@ -91,6 +91,14 @@
       "face_recognition": {
         "name": "Face recognition"
       }
+    },
+    "camera": {
+      "fixed": {
+        "name": "Fixed"
+      },
+      "movable": {
+        "name": "Movable"
+      }
     }
   },
   "config": {

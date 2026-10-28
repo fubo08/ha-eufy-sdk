@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from typing import Any
+from typing import Self
 from unittest.mock import Mock, patch
 
 from custom_components.eufy_sdk.camera import async_setup_entry
@@ -10,9 +10,7 @@ from custom_components.eufy_sdk.camera import async_setup_entry
 
 def _entry(devices: dict) -> SimpleNamespace:
     runtime = SimpleNamespace(snapshot_policy={})
-    entry = SimpleNamespace(
-        data={"host": "bridge", "port": 3000}, runtime_data=runtime
-    )
+    entry = SimpleNamespace(data={"host": "bridge", "port": 3000}, runtime_data=runtime)
     runtime.coordinator = SimpleNamespace(data=devices, config_entry=entry)
     return entry
 
@@ -59,16 +57,16 @@ class NvrViewsCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         class Response:
             status = 200
 
-            async def __aenter__(self):
+            async def __aenter__(self) -> Self:
                 return self
 
-            async def __aexit__(self, *_args: Any):
+            async def __aexit__(self, *_args: object) -> None:
                 return None
 
-            async def read(self):
+            async def read(self) -> bytes:
                 return b"jpeg"
 
-        def get(url: str, **_kwargs: Any):
+        def get(url: str, **_kwargs: object) -> Response:
             urls.append(url)
             return Response()
 
