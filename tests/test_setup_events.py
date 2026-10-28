@@ -32,6 +32,7 @@ class SetupEventTests(unittest.IsolatedAsyncioTestCase):
 
         client = Mock()
         client.set_poll_ms = AsyncMock()
+        client.bridge_id = None
         client.get_properties = AsyncMock(return_value=[])
         callbacks = []
 
@@ -59,6 +60,61 @@ class SetupEventTests(unittest.IsolatedAsyncioTestCase):
 
         callbacks[0]({"event": "armingModeChanged", "deviceSn": "unknown"})
         self.assertEqual(scheduled, [])
+
+    async def test_events_before_the_first_refresh_do_not_raise(self):
+        """Events arriving while coordinator.data is still None are skipped."""
+        hass = Mock()
+        hass.bus.async_fire = Mock()
+        hass.config_entries.async_forward_entry_setups = AsyncMock()
+        entry = Mock()
+        entry.data = {CONF_HOST: "bridge", CONF_PORT: 3000}
+        entry.options = {}
+        entry.domain = "eufy_sdk"
+        entry.entry_id = "test-entry"
+        entry.add_update_listener = Mock(return_value=lambda: None)
+        entry.async_on_unload = Mock()
+        entry.async_create_background_task = Mock()
+        coordinator = Mock(data={"homebase": {"state": {}}})
+        coordinator.async_config_entry_first_refresh = AsyncMock()
+        client = Mock()
+        client.set_poll_ms = AsyncMock()
+        client.bridge_id = None
+        client.get_properties = AsyncMock(return_value=[])
+        callbacks = []
+
+        def make_client(**kwargs: Any) -> Mock:
+            callbacks.append(kwargs["on_event"])
+            return client
+
+        with (
+            patch.object(
+                integration, "EufySdkDataUpdateCoordinator", return_value=coordinator
+            ),
+            patch.object(integration, "EufySdkApiClient", side_effect=make_client),
+            patch.object(integration, "async_get_clientsession", return_value=Mock()),
+            patch.object(
+                integration, "async_get_loaded_integration", return_value=Mock()
+            ),
+        ):
+            await integration.async_setup_entry(hass, entry)
+
+        coordinator.data = None  # e.g. a reconnect before the refresh lands
+        for event in (
+            {"event": "armingModeChanged", "deviceSn": "homebase"},
+            {"event": "armingModeChanged", "deviceSn": "homebase", "mode": 1},
+            {"event": "contactState", "deviceSn": "sensor", "open": True},
+            {"event": "propertyChanged", "deviceSn": "cam", "property": "enabled"},
+            {
+                "event": "propertyChanged",
+                "deviceSn": "cam",
+                "property": "x",
+                "value": 1,
+            },
+        ):
+            with self.subTest(event=event["event"]):
+                callbacks[0](event)  # must not raise
+        entry.async_create_background_task.assert_not_called()
+        self.assertEqual(hass.bus.async_fire.call_count, 5)
 
 
 if __name__ == "__main__":

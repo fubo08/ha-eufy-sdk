@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import callback
+from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_point_in_time
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import ATTRIBUTION, DOMAIN, EVENT_TYPE, SOLIX_READING_EVENT
 from .coordinator import EufySdkDataUpdateCoordinator
+from .schedule_logic import MODE_SCHEDULE, next_schedule_boundary
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
@@ -225,15 +228,75 @@ class EufySdkDeviceEntity(CoordinatorEntity[EufySdkDataUpdateCoordinator]):
         )
 
 
-def device_offline(record: dict | None) -> bool:
-    """
-    Whether the cloud reports this device offline (`deviceStatus` is False).
+# Conservative per-device offline windows for the `lastSeenMs` fallback. `deviceStatus`
+# (the cloud's param 1131) is NOT a reliable online signal: it means different things on
+# different devices. So the bridge now forwards the SDK's honest liveness facts and we
+# judge staleness here. The window differs by device class (the SDK leaves the threshold
+# to the host): a mains device reports constantly, a battery one far less often, and a
+# battery sensor can be silent for days by design.
+_OFFLINE_WINDOW_STATION_MS = 30 * 60 * 1000
+_OFFLINE_WINDOW_MAINS_CAMERA_MS = 30 * 60 * 1000
+_OFFLINE_WINDOW_BATTERY_CAMERA_MS = 6 * 60 * 60 * 1000
 
-    Only devices that report `deviceStatus` (battery cameras, HomeBase-attached
-    devices) can be offline here. Where the key is missing the state is unknown,
-    and unknown is not offline, so those devices stay available as before.
+
+def _staleness_window_ms(record: dict) -> int | None:
     """
-    return (record or {}).get("state", {}).get("deviceStatus") is False
+    How long a device of this class may be silent before staleness implies offline.
+
+    `None` means this class is silent by design (sensors, locks, lights) and never
+    goes offline from `lastSeenMs` alone.
+    """
+    codec = record.get("codec")
+    if codec == "station":
+        return _OFFLINE_WINDOW_STATION_MS
+    if codec == "camera":
+        # The bridge tags a camera's supply; a battery camera reports far less
+        # often than a wired one.
+        if record.get("power") == "battery":
+            return _OFFLINE_WINDOW_BATTERY_CAMERA_MS
+        return _OFFLINE_WINDOW_MAINS_CAMERA_MS
+    return None
+
+
+def device_offline(record: dict | None, now_ms: float | None = None) -> bool:
+    """
+    Whether this device should be treated as offline.
+
+    Prefers the SDK's honest liveness facts (forwarded by the bridge) over the
+    ambiguous cloud `deviceStatus` param:
+
+    1. an explicit vendor availability observation, when seen, is authoritative;
+    2. an active live feed proves the device is reachable right now;
+    3. otherwise staleness — `lastSeenMs` older than this device class's window
+       (and classes that are silent by design never go offline this way);
+    4. only when none of those facts are present (an older bridge) does the legacy
+       `deviceStatus` flag still decide, so behaviour is unchanged until the bridge
+       forwards the facts.
+    """
+    rec = record or {}
+
+    availability = rec.get("availability")
+    if availability in ("unavailable", "available"):
+        return availability == "unavailable"
+
+    # A live feed, or a standalone device's live P2P transport, proves reachability
+    # right now — even while the device sends only keepalives and `lastSeenMs` stays
+    # put (ha-eufy-sdk #121).
+    if rec.get("streaming") or rec.get("p2pReachable"):
+        return False
+
+    last_seen = rec.get("lastSeenMs")
+    if isinstance(last_seen, (int, float)) and not isinstance(last_seen, bool):
+        window = _staleness_window_ms(rec)
+        if window is None:
+            return False
+        now = time.time() * 1000 if now_ms is None else now_ms
+        return (now - last_seen) > window
+
+    # No liveness facts at all: an older bridge — fall back to the legacy flag.
+    if availability is None:
+        return rec.get("state", {}).get("deviceStatus") is False
+    return False
 
 
 def label_for(prop: str) -> str:
@@ -309,37 +372,124 @@ class EufySdkPropertyEntity(EufySdkDeviceEntity):
         self._spec = spec
         self._prop: str = spec["name"]
         self._attr_unique_id = f"{sn}_{self._prop}"
+        # A read-only property the device has never reported would only ever show
+        # unknown, so it starts disabled. It can be enabled, and fills in once reported.
+        if not spec.get("writable") and spec.get("reported") is False:
+            self._attr_entity_registry_enabled_default = False
         if not self._named_by_translation:
             self._attr_name = label_for(self._prop)
         self._post_write_unsub: Callable[[], None] | None = None
+        self._post_write_owner: int | None = None
         self._assumed_value: Any = None
+        self._optimistic_owner: int | None = None
+        self._write_generation = 0
+        self._report_generation = 0
+        self._removed = False
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to authoritative realtime updates for this property."""
+        self._removed = False
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self.hass.bus.async_listen(
+                EVENT_TYPE,
+                self._handle_property_changed,
+                event_filter=self._property_event_filter,
+            )
+        )
+
+    @callback
+    def _property_event_filter(self, data: dict[str, Any]) -> bool:
+        """Accept only valued realtime reports for this property entity."""
+        # Home Assistant passes an event_filter the event's data dict, not the Event.
+        return (
+            data.get("event") == "propertyChanged"
+            and (data.get("deviceSn") or data.get("sn")) == self._sn
+            and data.get("property") == self._prop
+            and "value" in data
+        )
+
+    @callback
+    def _handle_property_changed(self, event: Event) -> None:
+        """Release an optimistic write as soon as real device state arrives."""
+        data = event.data
+        if data.get("event") != "propertyChanged":
+            return
+        if (data.get("deviceSn") or data.get("sn")) != self._sn:
+            return
+        if data.get("property") != self._prop:
+            return
+        if "value" not in data:
+            return
+
+        # This report is authoritative for the state the device observed. If it
+        # arrived while a write RPC was pending, its ordering relative to that
+        # write is unknown, so that write must not later restore an optimistic value.
+        self._report_generation += 1
+        if self._post_write_unsub is not None:
+            self._post_write_unsub()
+            self._post_write_unsub = None
+        self._post_write_owner = None
+        self._optimistic_owner = None
+        self._assumed_value = None
+        self.async_write_ha_state()
 
     @property
     def prop_value(self) -> Any:
         """The held optimistic value if set, else the device's live state."""
-        if self._assumed_value is not None:
+        live = self.device.get("state", {}).get(self._prop)
+        # A write-only setting has no live state to fall back to, so the written value
+        # is held. Should the device start reporting one, its report wins.
+        if self._assumed_value is not None and (live is None or not self.write_only):
             return self._assumed_value
-        return self.device.get("state", {}).get(self._prop)
+        return live
 
     @property
     def write_only(self) -> bool:
-        """Whether the device accepts this setting but never reports it back."""
-        return bool(self._spec.get("writeOnly"))
+        """
+        Whether the device accepts this setting but does not report it back.
+
+        Either a declared write-only setting, or a settable one the device has never
+        reported (`reported: false`), which would otherwise drop back to unknown
+        after every write.
+        """
+        return bool(self._spec.get("writeOnly")) or (
+            bool(self._spec.get("writable")) and self._spec.get("reported") is False
+        )
 
     async def write(self, value: Any) -> None:
-        """Write, hold the value optimistically, and reconcile via a delayed pull."""
+        """Write while keeping optimistic state owned by the latest operation."""
+        self._write_generation += 1
+        owner = self._write_generation
+        report_generation = self._report_generation
+
         await self.client.set_property(self._sn, self._prop, value)
-        # Keep the intended value shown until the delayed pull reconciles it.
-        self._assumed_value = value
-        self.async_write_ha_state()
-        # A write-only setting never comes back in a pull, so reconciling would only
-        # drop the value just written back to unknown: the written value is the state.
+
+        if self._removed:
+            return
+
+        latest_write = owner == self._write_generation
+        report_arrived = report_generation != self._report_generation
+
+        if latest_write and not report_arrived:
+            self._assumed_value = value
+            self._optimistic_owner = owner
+            self.async_write_ha_state()
+
         if self.write_only:
             return
-        # Schedule one delayed re-pull (replacing any pending) so a slow change
-        # is reflected without waiting for the next scheduled poll.
+
+        self._schedule_post_write_refresh(owner)
+
+    def _schedule_post_write_refresh(self, owner: int) -> None:
+        """Schedule reconciliation without replacing a newer write's refresh."""
+        if self._removed:
+            return
+        if self._post_write_owner is not None and self._post_write_owner > owner:
+            return
         if self._post_write_unsub is not None:
             self._post_write_unsub()
+        self._post_write_owner = owner
         self._post_write_unsub = async_call_later(
             self.hass, POST_WRITE_REFRESH_SECS, self._post_write_refresh
         )
@@ -347,19 +497,83 @@ class EufySdkPropertyEntity(EufySdkDeviceEntity):
     @callback
     def _post_write_refresh(self, _now: Any) -> None:
         """Fire the delayed post-write reconcile."""
+        owner = self._post_write_owner
         self._post_write_unsub = None
-        self.hass.async_create_task(self._reconcile())
+        self._post_write_owner = None
+        if owner is not None:
+            self.hass.async_create_task(self._reconcile(owner))
 
-    async def _reconcile(self) -> None:
-        """Pull fresh cloud state, drop the optimistic hold, re-render to truth."""
+    async def _reconcile(self, owner: int) -> None:
+        """Pull fresh state and release only the optimistic value this pull owns."""
         await self.coordinator.async_request_refresh()
-        self._assumed_value = None
-        self.async_write_ha_state()
+        if self._optimistic_owner == owner:
+            self._optimistic_owner = None
+            self._assumed_value = None
+            self.async_write_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:
-        """Cancel a pending delayed refresh when the entity goes away."""
+        """Invalidate pending writes and reconciliation when the entity goes away."""
+        self._removed = True
+        self._write_generation += 1
+        self._report_generation += 1
         if self._post_write_unsub is not None:
             self._post_write_unsub()
             self._post_write_unsub = None
+        self._post_write_owner = None
+        self._optimistic_owner = None
         self._assumed_value = None
         await super().async_will_remove_from_hass()
+
+
+class ScheduleBoundaryMixin:
+    """
+    Re-write an entity's state at each slot boundary of its station's timetable.
+
+    While the station is on Schedule the enforced mode depends on the clock, and a
+    slot can turn over with no push and no poll for up to a full poll interval, so
+    the entity wakes at the next slot start or end and writes again there. For a
+    device entity bound to an arming-capable station.
+    """
+
+    _boundary_unsub: CALLBACK_TYPE | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Start following the timetable's slot boundaries."""
+        await super().async_added_to_hass()
+        self._arm_boundary()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Stop the pending boundary timer."""
+        self._cancel_boundary()
+        await super().async_will_remove_from_hass()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Re-arm the boundary timer against the fresh state, then write."""
+        self._arm_boundary()
+        super()._handle_coordinator_update()
+
+    def _cancel_boundary(self) -> None:
+        if self._boundary_unsub is not None:
+            self._boundary_unsub()
+            self._boundary_unsub = None
+
+    @callback
+    def _arm_boundary(self) -> None:
+        """Wake at the next slot start or end while the station is on Schedule."""
+        self._cancel_boundary()
+        state = self.device.get("state", {})
+        if state.get("armingMode") not in (MODE_SCHEDULE, str(MODE_SCHEDULE)):
+            return
+        at = next_schedule_boundary(state.get("jsonSchedule"), dt_util.now())
+        if at is not None:
+            self._boundary_unsub = async_track_point_in_time(
+                self.hass, self._on_boundary, at
+            )
+
+    @callback
+    def _on_boundary(self, _now: Any) -> None:
+        """Write the state the new slot brings, then wait for the next boundary."""
+        self._boundary_unsub = None
+        self.async_write_ha_state()
+        self._arm_boundary()
